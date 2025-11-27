@@ -1,223 +1,65 @@
-from dotenv import load_dotenv
+# app.py
 import streamlit as st
-import requests
-from bs4 import BeautifulSoup
-import json
-import pandas as pd
+from llm_clients import generate_answer
 
-# ----------------------------------------------------------
-# 1. Hugging Face LLM CALLER
-# ----------------------------------------------------------
-import os
-# Load environment variables from env/.env
-load_dotenv(".env")
+st.set_page_config(page_title="Regulation Requirement Extractor", layout="wide")
+st.title("📜 Regulation Requirement Extractor")
+st.markdown("""
+Paste any legislation or regulatory text below, and the AI will extract 
+actionable engineering requirements for your product.
+""")
 
-HF_TOKEN = os.getenv("HF_TOKEN")
-HF_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
-
-def hf_llm(prompt):
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    payload = {
-        "model": HF_MODEL,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 400
-    }
-
-    response = requests.post(
-        "https://router.huggingface.co/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=120
-    )
-
-    try:
-        result = response.json()
-        if "choices" in result:
-            return result["choices"][0]["message"]["content"]
-        else:
-            return f"Unexpected response format: {result}"
-    except Exception as e:
-        try:
-            error_data = response.json()
-            return f"LLM error: {error_data}"
-        except:
-            return f"LLM error: {response.status_code} - {response.text}"
-
-
-# ----------------------------------------------------------
-# 2. SIMPLE SCRAPERS FOR REGULATION SOURCES
-# ----------------------------------------------------------
-def scrape_eu_regulations():
-    """Scrape EU battery regulations (mock simplifié)."""
-    url = "https://eur-lex.europa.eu/legal-content/FR/TXT/?uri=CELEX:32023R1542"
-    html = requests.get(url).text
-    soup = BeautifulSoup(html, "html.parser")
-
-    paragraphs = [p.get_text() for p in soup.find_all("p")]
-    text = "\n".join(paragraphs[:20])  # simple + rapide
-    return text
-
-
-def scrape_nhtsa_airbags():
-    """Scrape NHTSA mock."""
-    url = "https://www.nhtsa.gov/laws-regulations"
-    html = requests.get(url).text
-    soup = BeautifulSoup(html, "html.parser")
-
-    titles = [h.get_text() for h in soup.find_all("h2")]
-    return "\n".join(titles[:15])
-
-
-def scrape_china_cybersec():
-    """Mock — pas de site officiel lisible sans login."""
-    return """
-China Automotive Cybersecurity Draft 2024:
-- Mandatory encryption for CAN bus
-- OTA updates must be logged and auditable
-- All telematics modules must pass penetration testing
-"""
-
-
-# ----------------------------------------------------------
-# 3. LLM — extract compliance requirements
-# ----------------------------------------------------------
-def extract_requirements(raw_text):
-    prompt = f"""
-You are a regulatory compliance extraction AI.
-Extract clear engineering REQUIREMENTS from the following text.
-
-TEXT:
-{raw_text}
-
-Return a list only, format:
-- Requirement: <short engineering requirement>
+# ----------------- Helpers -----------------
+def chunk_text(text, max_chars=40000):
     """
-
-    return hf_llm(prompt)
-
-
-# ----------------------------------------------------------
-# 4. Compare with vehicle specs
-# ----------------------------------------------------------
-def compare_specs_to_requirements(requirements, vehicle_specs):
-
-    prompt = f"""
-You are an automotive compliance analysis AI.
-
-Given the REQUIREMENTS extracted:
-{requirements}
-
-And the VEHICLE SPECIFICATIONS:
-{vehicle_specs}
-
-1. Determine requirement-by-requirement if the car is compliant (YES/NO).
-2. Compute a GLOBAL COMPLIANCE SCORE (0-100%).
-3. Return JSON only, format:
-
-{{
-  "score": <int>,
-  "analysis": [
-      {{"requirement": "...", "status": "YES/NO", "explanation": "..."}}
-  ]
-}}
-
-Only return JSON, nothing else.
+    Split text into chunks of max_chars length.
+    Tries to cut at the last period to avoid breaking sentences.
     """
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + max_chars
+        if end < len(text):
+            period = text.rfind(".", start, end)
+            if period != -1:
+                end = period + 1
+        chunks.append(text[start:end].strip())
+        start = end
+    return chunks
 
-    result = hf_llm(prompt)
-
-    # Try to parse JSON safely
-    try:
-        json_start = result.index("{")
-        json_data = json.loads(result[json_start:])
-        return json_data
-    except:
-        return {"score": 0, "analysis": [{"requirement": "Parsing error", "status": "NO"}]}
-
-
-# ----------------------------------------------------------
-# STREAMLIT UI
-# ----------------------------------------------------------
-st.title("🔎 GPS Réglementaire – Prototype Hackathon")
-st.subheader("Automated regulatory scraping + LLM compliance scoring")
-
-st.markdown("---")
-
-# ----------------------------------------------------------
-# Step 1: Vehicle specifications
-# ----------------------------------------------------------
-st.header("🚗 1. Provide Vehicle Specifications")
-
-vehicle_specs = st.text_area(
-    "Enter car technical specifications:",
-    """
-Battery: 55 kWh Lithium-ion, meets REACH Annex XVII
-Airbags: front + side, using Bosch airbag module 2024
-Connectivity: 4G modem, OTA updates enabled, encrypted TLS1.3
-Materials: dashboard plastic contains 8% recycled material
-"""
+# ----------------- Streamlit UI -----------------
+reg_text = st.text_area(
+    label="Paste legislation / regulation text here",
+    height=300,
+    placeholder="Paste the full text of the regulation here..."
 )
 
-# ----------------------------------------------------------
-# Step 2: Select regulation sources
-# ----------------------------------------------------------
-st.header("📚 2. Select Regulation Sources to Scrape")
+max_tokens = st.slider("Max tokens per chunk", min_value=100, max_value=3000, value=1000, step=50)
 
-sources = st.multiselect(
-    "Sources:",
-    ["EU Battery Regulation", "US NHTSA Airbags", "China Cybersecurity"],
-    default=["EU Battery Regulation", "US NHTSA Airbags"]
-)
+if st.button("Extract Requirements"):
+    if not reg_text.strip():
+        st.warning("Please paste some text before extracting requirements.")
+    else:
+        with st.spinner("Analyzing text with LLM..."):
+            chunks = chunk_text(reg_text, max_chars=30000)
+            all_results = []
+            
+            for i, chunk in enumerate(chunks):
+                st.info(f"Processing chunk {i+1}/{len(chunks)}...")
+                prompt = f"""
+You are a compliance assistant. Extract all actionable engineering requirements
+from the following regulatory text, keep only the most important part. Format them as a numbered list with clear instructions.
 
+Regulatory Text:
+{chunk}
+"""
+                try:
+                    result = generate_answer(prompt, max_tokens=max_tokens)
+                    all_results.append(result)
+                except Exception as e:
+                    st.error(f"Error while processing chunk {i+1}: {e}")
 
-# ----------------------------------------------------------
-# Step 3: SCRAPE
-# ----------------------------------------------------------
-if st.button("🔎 Scrape Regulations"):
-    scraped_text = ""
-
-    if "EU Battery Regulation" in sources:
-        scraped_text += "\n\n=== EU Regulation ===\n" + scrape_eu_regulations()
-
-    if "US NHTSA Airbags" in sources:
-        scraped_text += "\n\n=== NHTSA Airbags ===\n" + scrape_nhtsa_airbags()
-
-    if "China Cybersecurity" in sources:
-        scraped_text += "\n\n=== China Cybersecurity ===\n" + scrape_china_cybersec()
-
-    st.success("Regulations scraped!")
-    st.text_area("Scraped Text", scraped_text, height=300)
-
-    st.session_state["scraped"] = scraped_text
-
-
-# ----------------------------------------------------------
-# Step 4: Extract Requirements
-# ----------------------------------------------------------
-if "scraped" in st.session_state:
-    if st.button("🧠 Extract Engineering Requirements (LLM)"):
-        req = extract_requirements(st.session_state["scraped"])
-        st.session_state["requirements"] = req
-        st.success("Requirements extracted!")
-        st.text_area("Extracted Requirements", req, height=250)
-
-
-# ----------------------------------------------------------
-# Step 5: Compliance Scoring
-# ----------------------------------------------------------
-if "requirements" in st.session_state:
-    if st.button("📊 Compute Compliance Score"):
-        result = compare_specs_to_requirements(
-            st.session_state["requirements"],
-            vehicle_specs
-        )
-        st.session_state["result"] = result
-
-        st.success("Compliance score generated!")
-
-        st.metric("Global Compliance Score", f"{result['score']} %")
-
-        df = pd.DataFrame(result["analysis"])
-        st.dataframe(df)
+            final_output = "\n".join(all_results)
+            st.success("✅ Extraction complete!")
+            st.subheader("Extracted Requirements")
+            st.text_area("Requirements", value=final_output, height=400)
